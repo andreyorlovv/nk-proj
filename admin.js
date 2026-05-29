@@ -1,70 +1,51 @@
-import { createClient } from '@supabase/supabase-js'
-import * as XLSX from 'xlsx'
-import { IncomingForm } from 'formidable'
-import fs from 'fs'
+import { useState } from 'react'
+import { useRouter } from 'next/router'
+import { supabase } from '../lib/supabase'
 
-export const config = { api: { bodyParser: false } }
+export default function LoginPage() {
+  const router = useRouter()
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
 
-const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-)
+  async function handleLogin(e) {
+    e.preventDefault()
+    setLoading(true); setError('')
+    const { error } = await supabase.auth.signInWithPassword({ email, password })
+    setLoading(false)
+    if (error) { setError('Неверный email или пароль'); return }
+    router.push('/dashboard')
+  }
 
-export default async function handler(req, res) {
-  if (req.method !== 'POST') return res.status(405).end()
-
-  const form = new IncomingForm({ uploadDir: '/tmp', keepExtensions: true })
-  form.parse(req, async (err, fields, files) => {
-    if (err) return res.status(500).json({ error: 'Ошибка загрузки файла' })
-
-    const inst_id = Array.isArray(fields.inst_id) ? fields.inst_id[0] : fields.inst_id
-    const file = Array.isArray(files.file) ? files.file[0] : files.file
-    if (!file) return res.status(400).json({ error: 'Файл не найден' })
-
-    try {
-      const buf = fs.readFileSync(file.filepath)
-      const wb = XLSX.read(buf, { type: 'buffer' })
-      const ws = wb.Sheets[wb.SheetNames[0]]
-      const rows = XLSX.utils.sheet_to_json(ws)
-
-      let imported = 0, updated = 0
-
-      for (const row of rows) {
-        const reg = String(row['reg_number'] || row['Рег. номер'] || '').trim()
-        if (!reg) continue
-
-        const rowInstId = row['inst_id'] || inst_id
-
-        // Upsert позиции
-        const { data: posData } = await supabaseAdmin
-          .from('positions')
-          .upsert({ inst_id: rowInstId, reg_number: reg }, { onConflict: 'inst_id,reg_number' })
-          .select('id')
-          .single()
-
-        if (!posData?.id) { imported++; continue }
-
-        // Если в Excel есть status_id — обновить статус
-        const statusId = row['status_id'] || ''
-        if (statusId) {
-          const pct = row['nk_percent'] ? parseInt(row['nk_percent']) : null
-          await supabaseAdmin.from('position_status').upsert({
-            position_id: posData.id,
-            status_id: statusId,
-            nk_percent: pct,
-            updated_at: new Date().toISOString(),
-            updated_by: 'excel-import',
-          }, { onConflict: 'position_id' })
-          updated++
-        } else {
-          imported++
-        }
-      }
-
-      fs.unlinkSync(file.filepath)
-      return res.status(200).json({ imported, updated })
-    } catch (e) {
-      return res.status(500).json({ error: e.message })
-    }
-  })
+  return (
+    <div style={{ minHeight:'100vh', background:'#1a237e', display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', padding:16 }}>
+      <div style={{ marginBottom:32, textAlign:'center' }}>
+        <div style={{ fontSize:48, marginBottom:8 }}>🔧</div>
+        <h1 style={{ color:'white', fontSize:'1.5rem', fontWeight:700, margin:0 }}>Мониторинг работ</h1>
+        <p style={{ color:'rgba(255,255,255,0.6)', margin:'4px 0 0', fontSize:'0.9rem' }}>Система контроля статусов НК</p>
+      </div>
+      <div style={{ background:'white', borderRadius:20, padding:'28px 24px', width:'100%', maxWidth:380, boxShadow:'0 8px 32px rgba(0,0,0,0.2)' }}>
+        {error && <div className="alert alert-danger py-2 small mb-3">{error}</div>}
+        <form onSubmit={handleLogin}>
+          <div className="mb-3">
+            <label className="form-label small fw-semibold text-muted">EMAIL</label>
+            <input type="email" className="form-control" style={{borderRadius:10, padding:'10px 14px'}}
+              value={email} onChange={e => setEmail(e.target.value)} required autoFocus
+              placeholder="your@email.com" />
+          </div>
+          <div className="mb-4">
+            <label className="form-label small fw-semibold text-muted">ПАРОЛЬ</label>
+            <input type="password" className="form-control" style={{borderRadius:10, padding:'10px 14px'}}
+              value={password} onChange={e => setPassword(e.target.value)} required
+              placeholder="••••••••" />
+          </div>
+          <button type="submit" className="btn btn-primary w-100 btn-action" disabled={loading}
+            style={{borderRadius:12, padding:'12px', fontWeight:600, background:'#1a237e', border:'none'}}>
+            {loading ? <><span className="spinner-border spinner-border-sm me-2"/>Вход...</> : 'Войти'}
+          </button>
+        </form>
+      </div>
+    </div>
+  )
 }

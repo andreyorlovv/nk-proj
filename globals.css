@@ -1,0 +1,364 @@
+import { useEffect, useState, useCallback } from 'react'
+import { useRouter } from 'next/router'
+import { supabase } from '../lib/supabase'
+import { INSTALLATIONS, STATUSES, BLOCK_REASONS } from '../lib/config'
+
+// ── helpers ────────────────────────────────────────────────
+function getStatusObj(id) { return STATUSES.find(s => s.id === id) }
+function statusLabel(id, pct) {
+  const s = getStatusObj(id)
+  if (!s) return id
+  return id === 'nk_prep' && pct != null ? `Подготовка к НК на ${pct}%` : s.label
+}
+function statusColor(id) { return getStatusObj(id)?.color || 'secondary' }
+
+// ── Bottom Sheet Modal ──────────────────────────────────────
+function Sheet({ title, onClose, children }) {
+  return <>
+    <div className="modal-overlay" onClick={onClose}/>
+    <div className="modal-sheet">
+      <div className="modal-handle"/>
+      <div className="d-flex justify-content-between align-items-center mb-3">
+        <h6 className="mb-0 fw-bold">{title}</h6>
+        <button className="btn btn-sm btn-light rounded-circle" style={{width:32,height:32,padding:0}} onClick={onClose}>✕</button>
+      </div>
+      {children}
+    </div>
+  </>
+}
+
+// ── History Sheet ───────────────────────────────────────────
+function HistorySheet({ pos, instName, onClose }) {
+  const [rows, setRows] = useState(null)
+  useEffect(() => {
+    supabase.from('status_history').select('*')
+      .eq('position_id', pos.id).order('changed_at', { ascending: false }).limit(50)
+      .then(({ data }) => setRows(data || []))
+  }, [pos.id])
+
+  return (
+    <Sheet title={`${instName}, ${pos.reg_number}`} onClose={onClose}>
+      {rows === null
+        ? <div className="text-center py-3"><span className="spinner-border spinner-border-sm"/></div>
+        : rows.length === 0
+          ? <p className="text-muted text-center small">История пуста</p>
+          : rows.map(h => (
+            <div key={h.id} className="history-item">
+              <div className="d-flex align-items-center gap-2 flex-wrap">
+                <span className={`badge bg-${statusColor(h.status_id)} status-badge`}>
+                  {statusLabel(h.status_id, h.nk_percent)}
+                </span>
+                {h.blocked && <span className="badge bg-danger block-badge">⛔ {h.block_reason}</span>}
+              </div>
+              {h.note && <div className="small text-muted mt-1">💬 {h.note}</div>}
+              <div className="d-flex gap-2 mt-1">
+                <span className="history-time">{new Date(h.changed_at).toLocaleString('ru-RU')}</span>
+                <span className="history-who">— {h.changed_by}</span>
+              </div>
+            </div>
+          ))
+      }
+    </Sheet>
+  )
+}
+
+// ── Status Change Sheet ─────────────────────────────────────
+function StatusSheet({ pos, instName, current, onClose, onSave, userEmail }) {
+  const [selStatus, setSelStatus] = useState(current?.status_id || 'pending')
+  const [nkPct, setNkPct]         = useState(current?.nk_percent ?? '')
+  const [blocked, setBlocked]     = useState(current?.blocked || false)
+  const [blockReason, setBlockReason] = useState(current?.block_reason || '')
+  const [note, setNote]           = useState('')
+  const [saving, setSaving]       = useState(false)
+
+  async function save() {
+    setSaving(true)
+    const pct = selStatus === 'nk_prep' ? (parseInt(nkPct) || 0) : null
+    const payload = {
+      position_id: pos.id, status_id: selStatus, nk_percent: pct,
+      blocked, block_reason: blocked ? blockReason : null,
+      note: note.trim() || null,
+      updated_at: new Date().toISOString(), updated_by: userEmail,
+    }
+    await supabase.from('position_status').upsert(payload, { onConflict: 'position_id' })
+    await supabase.from('status_history').insert({
+      position_id: pos.id, status_id: selStatus, nk_percent: pct,
+      blocked, block_reason: blocked ? blockReason : null,
+      note: note.trim() || null, changed_by: userEmail,
+    })
+    setSaving(false); onSave()
+  }
+
+  return (
+    <Sheet title={`${instName}, ${pos.reg_number}`} onClose={onClose}>
+      <p className="small text-muted mb-2">Выберите статус:</p>
+      {STATUSES.map(s => (
+        <div key={s.id} className={`status-option ${selStatus === s.id ? 'selected' : ''}`}
+          onClick={() => setSelStatus(s.id)}>
+          <span className={`badge bg-${s.color} me-2`}></span>
+          <span className="small fw-semibold">{s.label}</span>
+        </div>
+      ))}
+
+      {selStatus === 'nk_prep' && (
+        <div className="mt-3">
+          <label className="form-label small fw-semibold">Процент готовности</label>
+          <div className="input-group">
+            <input type="number" min="0" max="100" className="form-control"
+              value={nkPct} onChange={e => setNkPct(e.target.value)} placeholder="0–100"/>
+            <span className="input-group-text">%</span>
+          </div>
+        </div>
+      )}
+
+      {/* Блокировка */}
+      <div className="mt-3 p-3" style={{background:'#fff5f5', borderRadius:10}}>
+        <div className="form-check mb-2">
+          <input className="form-check-input" type="checkbox" id="blocked"
+            checked={blocked} onChange={e => setBlocked(e.target.checked)}/>
+          <label className="form-check-label fw-semibold small text-danger" htmlFor="blocked">
+            ⛔ Не можем начать / продолжить
+          </label>
+        </div>
+        {blocked && (
+          <>
+            <p className="small text-muted mb-1">Причина:</p>
+            {BLOCK_REASONS.map(r => (
+              <div key={r} className="form-check mb-1">
+                <input className="form-check-input" type="radio" name="blockReason" id={`br_${r}`}
+                  checked={blockReason === r} onChange={() => setBlockReason(r)}/>
+                <label className="form-check-label small" htmlFor={`br_${r}`}>{r}</label>
+              </div>
+            ))}
+          </>
+        )}
+      </div>
+
+      {/* Примечание */}
+      <div className="mt-3">
+        <label className="form-label small fw-semibold">Примечание (необязательно)</label>
+        <textarea className="form-control" rows={2} style={{borderRadius:10}}
+          placeholder="Комментарий мастера..."
+          value={note} onChange={e => setNote(e.target.value)}/>
+      </div>
+
+      <button className="btn btn-primary w-100 mt-3 btn-action" onClick={save}
+        disabled={saving || (blocked && !blockReason)}>
+        {saving ? <><span className="spinner-border spinner-border-sm me-2"/>Сохранение...</> : 'Сохранить'}
+      </button>
+    </Sheet>
+  )
+}
+
+// ── Report Sheet ────────────────────────────────────────────
+function ReportSheet({ positions, statuses, instName, onClose }) {
+  const report = STATUSES.map(s => ({
+    ...s,
+    count: positions.filter(p => statuses[p.id]?.status_id === s.id).length,
+    blocked: positions.filter(p => statuses[p.id]?.status_id === s.id && statuses[p.id]?.blocked).length,
+  }))
+  const totalBlocked = positions.filter(p => statuses[p.id]?.blocked).length
+
+  return (
+    <Sheet title={`Отчёт — ${instName}`} onClose={onClose}>
+      <p className="small text-muted mb-2">На текущий момент по {instName}:</p>
+      {report.map(r => (
+        <div key={r.id} className="d-flex justify-content-between align-items-center py-2 border-bottom">
+          <span className="small">{r.id === 'nk_prep' ? 'Подготовка к НК на XX% (в процессе)' : r.label}</span>
+          <div className="text-end ms-2">
+            <span className={`badge bg-${r.color}`}>{r.count} поз.</span>
+            {r.blocked > 0 && <span className="badge bg-danger ms-1">⛔{r.blocked}</span>}
+          </div>
+        </div>
+      ))}
+      <div className="d-flex justify-content-between pt-2 fw-bold">
+        <span>Итого</span><span>{positions.length} поз.</span>
+      </div>
+      {totalBlocked > 0 && (
+        <div className="alert alert-danger py-2 small mt-2 mb-0">
+          ⛔ Заблокировано: {totalBlocked} поз.
+        </div>
+      )}
+    </Sheet>
+  )
+}
+
+// ── Main Dashboard ──────────────────────────────────────────
+export default function Dashboard() {
+  const router = useRouter()
+  const [user, setUser]         = useState(null)
+  const [role, setRole]         = useState(null)   // 'admin' | 'master'
+  const [activeInst, setActiveInst] = useState(INSTALLATIONS[0].id)
+  const [positions, setPositions]   = useState([])
+  const [statuses, setStatuses]     = useState({})
+  const [search, setSearch]         = useState('')
+  const [loading, setLoading]       = useState(true)
+  const [sheet, setSheet]           = useState(null) // 'status'|'history'|'report'
+  const [activePos, setActivePos]   = useState(null)
+
+  useEffect(() => {
+    supabase.auth.getUser().then(({ data }) => {
+      if (!data.user) { router.push('/'); return }
+      setUser(data.user)
+      const r = data.user.user_metadata?.role || 'master'
+      setRole(r)
+    })
+  }, [])
+
+  const loadData = useCallback(async () => {
+    setLoading(true)
+    const { data: pos } = await supabase
+      .from('positions').select('*').eq('inst_id', activeInst).order('reg_number')
+    setPositions(pos || [])
+
+    const ids = (pos || []).map(p => p.id)
+    if (ids.length) {
+      const { data: st } = await supabase.from('position_status').select('*').in('position_id', ids)
+      const map = {}; (st || []).forEach(s => { map[s.position_id] = s }); setStatuses(map)
+    } else { setStatuses({}) }
+    setLoading(false)
+  }, [activeInst])
+
+  useEffect(() => { if (user) loadData() }, [user, loadData])
+
+  const instObj = INSTALLATIONS.find(i => i.id === activeInst)
+  const filtered = positions.filter(p =>
+    p.reg_number.toLowerCase().includes(search.toLowerCase())
+  )
+
+  async function handleExport() {
+    const res = await fetch(`/api/excel-export?inst_id=${activeInst}`)
+    const blob = await res.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a'); a.href = url
+    a.download = `${instObj?.name}_статусы.xlsx`; a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  if (!user) return (
+    <div className="d-flex justify-content-center align-items-center min-vh-100">
+      <span className="spinner-border text-primary"/>
+    </div>
+  )
+
+  return (
+    <>
+      {/* Navbar */}
+      <nav className="navbar navbar-dark px-3 py-2" style={{background:'#1a237e'}}>
+        <span className="navbar-brand mb-0 fw-bold fs-6">🔧 Мониторинг НК</span>
+        <div className="d-flex align-items-center gap-2">
+          {role === 'admin' && (
+            <a href="/admin" className="btn btn-sm btn-outline-light" style={{borderRadius:8, fontSize:'0.8rem'}}>⚙</a>
+          )}
+          <button className="btn btn-sm btn-outline-light" style={{borderRadius:8, fontSize:'0.8rem'}}
+            onClick={async () => { await supabase.auth.signOut(); router.push('/') }}>
+            Выйти
+          </button>
+        </div>
+      </nav>
+
+      {/* Install tabs */}
+      <div className="inst-tabs">
+        {INSTALLATIONS.map(inst => (
+          <button key={inst.id}
+            className={`btn btn-sm ${activeInst === inst.id ? 'btn-primary' : 'btn-outline-secondary'}`}
+            onClick={() => { setActiveInst(inst.id); setSearch('') }}>
+            {inst.name}
+          </button>
+        ))}
+      </div>
+
+      {/* Search + Export */}
+      <div className="px-3 pb-2 d-flex gap-2 align-items-center">
+        <input className="form-control search-bar flex-grow-1" placeholder="🔍 Поиск по номеру..."
+          value={search} onChange={e => setSearch(e.target.value)}/>
+        <button className="btn btn-outline-success btn-sm" style={{borderRadius:10, whiteSpace:'nowrap'}}
+          onClick={handleExport}>⬇ Excel</button>
+      </div>
+
+      {/* Stats row */}
+      <div className="px-3 pb-2 d-flex gap-2 flex-wrap">
+        <span className="badge bg-light text-dark border">{positions.length} поз.</span>
+        {(() => {
+          const bl = positions.filter(p => statuses[p.id]?.blocked).length
+          return bl > 0 ? <span className="badge bg-danger">⛔ {bl} заблок.</span> : null
+        })()}
+        <span className="badge bg-success">
+          ✅ {positions.filter(p => statuses[p.id]?.status_id === 'nk_done').length} НК проведен
+        </span>
+      </div>
+
+      {/* Position cards */}
+      <div className="px-3 pb-24" style={{paddingBottom:80}}>
+        {loading
+          ? <div className="text-center py-5"><span className="spinner-border text-primary"/></div>
+          : filtered.length === 0
+            ? <div className="text-center text-muted py-5">Нет позиций</div>
+            : filtered.map(pos => {
+                const st = statuses[pos.id]
+                return (
+                  <div key={pos.id} className={`pos-card card ${st?.blocked ? 'blocked' : ''}`}>
+                    <div className="card-body">
+                      <div className="d-flex justify-content-between align-items-start">
+                        <div>
+                          <div className="pos-reg">{pos.reg_number}</div>
+                          <div className="pos-inst">{instObj?.name}</div>
+                        </div>
+                        <div className="text-end">
+                          <span className={`badge bg-${statusColor(st?.status_id || 'pending')} status-badge`}>
+                            {statusLabel(st?.status_id || 'pending', st?.nk_percent)}
+                          </span>
+                        </div>
+                      </div>
+
+                      {st?.blocked && (
+                        <div className="mt-2">
+                          <span className="badge bg-danger block-badge">⛔ {st.block_reason}</span>
+                        </div>
+                      )}
+                      {st?.note && (
+                        <div className="mt-1 small text-muted">💬 {st.note}</div>
+                      )}
+
+                      <div className="d-flex gap-2 mt-2">
+                        <button className="btn btn-sm btn-outline-secondary flex-grow-1" style={{borderRadius:8}}
+                          onClick={() => { setActivePos(pos); setSheet('history') }}>
+                          📋 История
+                        </button>
+                        <button className="btn btn-sm btn-primary flex-grow-1" style={{borderRadius:8}}
+                          onClick={() => { setActivePos(pos); setSheet('status') }}>
+                          ✏️ Статус
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )
+              })
+        }
+      </div>
+
+      {/* FAB — Report */}
+      <button className="fab btn btn-primary px-4 py-2 fw-semibold"
+        onClick={() => setSheet('report')}>
+        📊 Отчёт
+      </button>
+
+      {/* Sheets */}
+      {sheet === 'status' && activePos && (
+        <StatusSheet pos={activePos} instName={instObj?.name}
+          current={statuses[activePos.id]}
+          userEmail={user.email}
+          onClose={() => setSheet(null)}
+          onSave={() => { setSheet(null); loadData() }}/>
+      )}
+      {sheet === 'history' && activePos && (
+        <HistorySheet pos={activePos} instName={instObj?.name}
+          onClose={() => setSheet(null)}/>
+      )}
+      {sheet === 'report' && (
+        <ReportSheet positions={positions} statuses={statuses}
+          instName={instObj?.name} onClose={() => setSheet(null)}/>
+      )}
+    </>
+  )
+}
